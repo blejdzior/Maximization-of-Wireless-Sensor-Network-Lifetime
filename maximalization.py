@@ -35,8 +35,8 @@ class Cover:
 
 
 class Network:
-    def __init__(self):
-        self.sensors = [] # Chromosome
+    def __init__(self, sensors):
+        self.sensors = sensors # Chromosome
         
         self.covers = [] # Count of covers - fitness function 1
         self.overlap = 0
@@ -106,11 +106,10 @@ def findCriticalTarget(targets):
         
 #upperLimit = number of sensors covering critical target
 def sensorCollectionforNetwork(sensors, targets, upperLimit):
-    random.shuffle(sensors)
-    network = Network()
+    covers = []
     i = 0
 
-    while len(network) <= upperLimit and i < len(sensors):    
+    while len(covers) <= upperLimit and i < len(sensors):    
         cover = Cover()
         while len(cover.targetsCovered) != len(targets) and i < len(sensors):
             if len(sensors[i].targetsInRange): 
@@ -121,43 +120,189 @@ def sensorCollectionforNetwork(sensors, targets, upperLimit):
             cover.lifetime = min(cover.sensors, key=lambda x: x.lifetime).lifetime
             cover.criticalTarget = findCriticalTarget(cover.targetsCovered)
             covers.append(cover)
-    network.calculateDF()
 
-    return network
-
+    return covers
 
 
+
+from pymoo.core.problem import ElementwiseProblem
+from pymoo.core.sampling import Sampling
+from pymoo.core.crossover import Crossover
+from pymoo.core.mutation import Mutation
+from pymoo.core.duplicate import ElementwiseDuplicateElimination
+
+class MyProblem(ElementwiseProblem):
+    def __init__(self, sensors, targets, upperLimit):
+        super().__init__(n_var = 1, n_obj=2, n_ieq_constr=0)
+        self.sensors = sensors
+        self.targets = targets
+        self.upperLimit = upperLimit
+        
+    def _evaluate(self, networks, out, *args, **kwargs):
+        res = []
+        for network in networks:
+            network.covers = sensorCollectionforNetwork(network.sensors, self.targets, self.upperLimit)
+            F1 = -len(network) # Number of covers in network -- first goal (needs to be maximized so minimizing negative value)
+            network.calculateDF()
+            F2 = network.DF # DF -- second goal - minimized
+            res.append([F1, F2])
+        out['F'] = np.array(res)
+
+
+class MySampling(Sampling):
+    def _do(self, problem, n_samples, **kwargs):
+        X = np.full((n_samples, 1), None, dtype=object)
+        
+
+        for i in range(n_samples):
+            sensors = random.sample(problem.sensors, len(problem.sensors))
+            X[i, 0] = Network(sensors)
+        return np.array(X)
+            
+
+class MyCrossover(Crossover):
+    def __init__(self):
+        
+        # define the crossover: number of parents and number of offsprings
+        super().__init__(2, 2)
+    
+    def _do(self, problem, X, **kwargs):
+        
+        # The input of has the following shape (n_parents, n_matings, n_var)
+        n_parents, n_matings, n_var = X.shape
+        
+        # Because there the number of parents and offsprings are equal it keeps the shape of X
+        Y = np.full_like(X, None, dtype=object)
+        
+        #for each mating provided
+        for k in range(n_matings):
+            #get the parents
+            a, b = X[0,k,0], X[1,k,0]
+            
+            #prepare the offsprings
+            off_a_sensors = []
+            off_b_sensors = []
+            
+            #Cutoff points - sensors of parent 1 to the left of cutting point will be copied to offspring
+            # then rest of sensors from parent 2 will be copied (exluding duplicates)
+            cutoff_a = random.randrange( len(a))
+            cutoff_b = random.randrange( len(b))
+            off_a_sensors = a.sensors[:cutoff_a]
+            off_b_sensors = b.sensors[:cutoff_b]
+            for sensor in b.sensors:
+                if sensor in off_a_sensors:
+                    continue
+                else:
+                    off_a_sensors.append(sensor)
+            for sensor in a.sensors:
+                if sensor in off_b_sensors:
+                    continue
+                else:
+                    off_b_sensors.append(sensor)
+            off_a = Network(off_b_sensors)
+            off_b = Network(off_a_sensors)
+            
+            Y[0, k, 0], Y[1, k, 0] = off_a, off_b
+        return Y
+        
+        
+        
+class MyMutation(Mutation):
+    def __init__(self):
+        super().__init__()
+    
+    def _do(self, problem, X, **kwargs):
+        for i in range(len(X)):
+                n_swapes = random.randint(1, len(X[i,0].sensors))
+                for k in range(n_swapes):
+                    id1 = random.randrange(len(X[i,0].sensors))
+                    id2 = random.randrange(len(X[i,0].sensors))
+                    gene1_copy = X[i,0].sensors[id1]
+                    X[i,0].sensors[id1] = X[i,0].sensors[id2]
+                    X[i,0].sensors[id2] = gene1_copy
+        return X
+    
+        
+class MyDuplicateElimination(ElementwiseDuplicateElimination):
+
+    def is_equal(self, a, b):
+        return a.X[0].sensors == b.X[0].sensors
+
+
+
+    
+    
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.optimize import minimize
+ 
+    
 targets, sensors = initialize(1000, 0, 7, 100, 20, 0)
 
 inspect.getmembers(sensors[0])
 criticalTarget = findCriticalTarget(targets)
+
+algorithm = NSGA2(pop_size=30,
+                  sampling=MySampling(),
+                  crossover=MyCrossover(),
+                  mutation=MyMutation(),
+                  eliminate_duplicates=MyDuplicateElimination())
+
+res = minimize(MyProblem(sensors, targets, len(criticalTarget.sensors)),
+               algorithm,
+               ('n_gen', 100),
+               seed=1,
+               verbose=False)
+               
+
+    
+from pymoo.visualization.scatter import Scatter
+Scatter().add(res.F).show()
+res.F
+res.X
 print(criticalTarget.sensors)
+
 # inspect.getmembers(criticalTarget)
-network = sensorCollectionforNetwork(sensors, targets, len(findCriticalTarget(targets).sensors))
 
-max_population = 10
-networks = []
-for i in range(max_population):
-    networks.append(sensorCollectionforNetwork(sensors,targets,len(findCriticalTarget(targets).sensors))
+# #(self, x, y, _range, battLife, _id)
+# sensor1 = Sensor(10,10, 1, 1, 1)
+# sensor2 = Sensor(11,11, 1, 1, 2)
+# sensor3 = Sensor(12,12, 1, 1, 3)
+# sensor4 = Sensor(13,13, 1, 1, 4)
+# sensors = []
+# sensors.append(sensor1)
+# sensors.append(sensor2)
+# sensors.append(sensor3)
+# sensors.append(sensor4)
 
-
+# network1 = Network(sensors)
+# sensors1 =  random.sample(sensors, len(sensors))
+# network2 = Network(sensors1)
+# network1.sensors == network2.sensors
+# network = sensorCollectionforNetwork(sensors, targets, len(findCriticalTarget(targets).sensors))
+              
                     
-                    
-print(network.DF)
-print(len(network.covers))
+# print(network.DF)
+# print(len(network.covers))
 # inspect.getmembers(network)
 
-# i = 0
-# for sensor in sensors:
-#     print(str(i) + " :")
-#     print("x: " + str(sensor.x))
-#     print("y: " + str(sensor.y))
-#     print("range: " + str(sensor.range))
-#     i = 1 + i
-#     for target in sensor.targetsInRange:
-#         print("target: " +  str(target.x) , str(target.y))
-#         for sensor in target.sensors:
-#             print("sensor for target: " + str(sensor.x), str(sensor.y))
-        
+for k in range(len(res.X)):
+    print("NETWORK: " + str(k))
+    j = 0
+    
+    for cover in res.X[k][0].covers:
+        print("  " + "COVER: " + str(j) +": ")
+        i = 0
+        j = j+1
+        for sensor in cover.sensors:
+            print("    " + str(i) + ": ")
+            print("     x: " + str(sensor.x))
+            print("     y: " + str(sensor.y))
+            print("     range: " + str(sensor.range))
+            i = 1 + i
+            # for target in sensor.targetsInRange:
+        #     print("  target: " +  str(target.x) , str(target.y))
+        #     for sensor in target.sensors:
+        #         print("  sensor for target: " + str(sensor.x), str(sensor.y))
+
 
 
